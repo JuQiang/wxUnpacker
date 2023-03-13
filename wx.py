@@ -3,7 +3,6 @@ import hashlib
 import os
 import json
 import urllib
-from helper import helper
 import jsbeautifier
 import execjs
 import argparse
@@ -24,34 +23,57 @@ import os
 # 4字节 文件长度
 # 数据段
 
+# 1、先把mac os的SIP做一个disable or enable SIP，否则lldb不能attach到wechat进程上。
+# 2、打开wechat，但是不登录。
+# 3、lldb -p wechat的pid。
+# 4、br set -n sqlite3_key，断点设置好后，c继续运行。
+# 5、微信登录后，会break到断点上，输入memory read --size 1 --format x --count 32 $rsi
+# 6、前16位即是你本机的wechat小程序加密的密钥，而完整的32位则是本机微信聊天记录sqlite db的密钥。
+
 OUTPUT_FOLDER = "output"
 NEED_BEAUTIFY_JS = False
-iv = "the iv: 16 bytes"
-salt = "saltiest"
+
+
 global_wxml = ["",0]
 
-def decrypt(wx_package, wxid):
-    fsize = os.path.getsize(wx_package)
 
-    f = open(wx_package, "rb")
-    f.seek(6)
-    wx_header = f.read(1024)
-    wx_others = f.read(fsize - 6 - 1024)
-    f.close()
+def get_string_by_seperators(source, begin_str, end_str, begin_index):
+    index = source.find(begin_str, begin_index)
+    if index == -1:
+        return "", -1
 
-    aes_key = hashlib.pbkdf2_hmac('sha1', wxid.encode(), salt.encode(), 1000, 32)
-    cipher = AES.new(aes_key, AES.MODE_CBC, iv.encode())
-    decrypted_wx_header = cipher.decrypt(wx_header)
-    n = decrypted_wx_header[-1]
-    if n > 0:
-        decrypted_wx_header = decrypted_wx_header[:-n]
+    index2 = source.find(end_str, index + len(begin_str))
+    if index2 == -1:
+        return "", -1
 
-    xor_key = ord(str(wxid[-2]))
-    decrypted_wx_others = []
-    for b in wx_others:
-        decrypted_wx_others.append(b ^ xor_key)
+    return source[index + len(begin_str):index2], index2 + len(end_str)
 
-    return decrypted_wx_header + bytes(decrypted_wx_others)
+def decrypt(buf, wxid, local_mac_package_key):
+    seek = 0 if len(local_mac_package_key)==16 else 6
+
+    wx_header = buf[seek:seek+1024]
+    wx_others = buf[seek+1024:]
+
+    if len(local_mac_package_key)==16:
+        cipher = AES.new(local_mac_package_key, AES.MODE_ECB)
+        decrypted_wx_header = cipher.decrypt(wx_header)
+
+        return decrypted_wx_header + wx_others
+    else:
+        aes_key = hashlib.pbkdf2_hmac('sha1', wxid.encode(), b"saltiest", 1000, 32)
+        cipher = AES.new(aes_key,AES.MODE_CBC,b"the iv: 16 bytes")
+
+        decrypted_wx_header = cipher.decrypt(wx_header)
+        n = decrypted_wx_header[-1]
+        if n > 0:
+            decrypted_wx_header = decrypted_wx_header[:-n]
+
+        xor_key = ord(str(wxid[-2]))
+        decrypted_wx_others = []
+        for b in wx_others:
+            decrypted_wx_others.append(b ^ xor_key)
+
+        return decrypted_wx_header + bytes(decrypted_wx_others)
 
 def write_file(fname, buf, mode):
     items = fname.split("/")
@@ -137,7 +159,7 @@ def process_json(fname):
             index = j.index(token)
             fname = j[1:index] + ".json"
             print("Processing " + fname)
-            content, index = helper.get_string_by_seperators(j[index + len(token) - 1:], "{", "};", 0)
+            content, index = get_string_by_seperators(j[index + len(token) - 1:], "{", "};", 0)
             content = json.dumps(json.loads("{" + content + "}"), indent=4)
             write_file(fname, content, "w")
 
@@ -213,7 +235,7 @@ def process_wxss(fname):
                     c3 = c3[1:]
                 content += c3
 
-            fname = helper.get_string_by_seperators(j, ',{path:"', '"})', 0)[0].replace("./", "")
+            fname = get_string_by_seperators(j, ',{path:"', '"})', 0)[0].replace("./", "")
             print("Processing " + fname)
             write_file(fname, content.replace("body {", "page {").replace(": : ", "::"), "w")
 
@@ -249,7 +271,7 @@ def process_wxml_nodes(nodes):
 def process_wxml_remove_useless(wxml_source):
     source = wxml_source
 
-    tmp = helper.get_string_by_seperators(wxml_source,"<script>","</script>",0)[0]
+    tmp = get_string_by_seperators(wxml_source,"<script>","</script>",0)[0]
     if len(tmp)>0:
         index = tmp.find("var setCssToHead")
         index2 = tmp.rindex(");")
@@ -282,12 +304,12 @@ def process_wxml(pageframe):
     x = []
     index = 0
     for item in items:
-        func = helper.get_string_by_seperators(item,"=",";",0)[0]
+        func = get_string_by_seperators(item,"=",";",0)[0]
         if "$" not in func:
             continue
         flist += "fuck_{0}={1};\n".format(index,func.strip())
         index+=1
-        x.append(helper.get_string_by_seperators(item,"'","'",0)[0])
+        x.append(get_string_by_seperators(item,"'","'",0)[0])
 
     source = process_wxml_remove_useless(source)
     patched_source = patch + source + flist
@@ -322,17 +344,16 @@ def process(flist,func):
             for sub in j["subPackages"]:
                 func(OUTPUT_FOLDER + "/" + sub["root"] + f)
 
-def get_package_content(wx_package, wxid):
+def get_package_content(wx_package, wxid,local_mac_package_key):
     fsize = os.path.getsize(wx_package)
 
     f = open(wx_package, "rb")
-    data = f.read(fsize)
+    buf = f.read(fsize)
     f.close()
 
-    buf = data
+    if int(buf[0]) != 190: # or (buf[0]==b"V" and buf[1]==b"1" and buf[2]==b"M" and buf[3]==b"M" and buf[4]==b"W" and buf[5]==b"X"):
+        buf = decrypt(buf, wxid,local_mac_package_key)
 
-    if int(data[0]) != 190 and data[0:6].decode() == "V1MMWX":
-        buf = decrypt(wx_package, wxid)
     if int(buf[0]) != 190:
         buf = None
 
@@ -344,6 +365,7 @@ def init():
     parser.add_argument("-i", help="A <folder name> which contains multiple wxapkg files, or a single wxapkg <file name>.")
     parser.add_argument("-o", help="Output folder.")
     parser.add_argument("-b",default=False, help="True/False means whether to beautify the JS code, True will result in a poor performance.")
+    parser.add_argument("-m",default="", help="A 16-bytes local MAC package key. Looks like '00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF'")
 
     args = parser.parse_args()
 
@@ -355,8 +377,10 @@ def init():
     global NEED_BEAUTIFY_JS
     NEED_BEAUTIFY_JS = args.b
 
+
     wxid = args.w
     input = args.i
+    local_mac_package_key = bytes.fromhex(args.m)
 
     wxapkg = []
 
@@ -371,10 +395,10 @@ def init():
                 if ".wxapkg" in f:
                     wxapkg.append(os.path.join(fp,f))
 
-    return wxid,wxapkg
+    return wxid,wxapkg,local_mac_package_key
 
 def main():
-    wxid, wxapkg = init()
+    wxid, wxapkg,local_mac_package_key = init()
     if wxid is None or len(wxapkg)==0:
         print("Error wxid or input files. Type < python3 wx.py --help > to get more information.")
         return
@@ -383,7 +407,7 @@ def main():
 
     print("Unpacking package...")
     for apkg in wxapkg:
-        buf = get_package_content(apkg,wxid)
+        buf = get_package_content(apkg,wxid,local_mac_package_key)
         if buf is not None:
             process_package(buf)
 
