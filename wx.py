@@ -7,6 +7,7 @@ import jsbeautifier
 import execjs
 import argparse
 import os
+import copy
 
 # 微信小程序文件格式
 # 文件头
@@ -34,8 +35,8 @@ OUTPUT_FOLDER = "output"
 NEED_BEAUTIFY_JS = False
 
 
-global_wxml = ["",0]
-
+WXML_CONTENT = ["", 0]
+COMMON_STYLESHEETS = {}
 
 def get_string_by_seperators(source, begin_str, end_str, begin_index):
     index = source.find(begin_str, begin_index)
@@ -163,8 +164,15 @@ def process_json(fname):
             content = json.dumps(json.loads("{" + content + "}"), indent=4)
             write_file(fname, content, "w")
 
+def process_json2(fname):
+    with open(fname,"r") as f:
+        appjson = json.load(f)
+    #appjson = copy.deepcopy(appjson)
+    del appjson["page"]
+
+    write_file("/app.json",json.dumps(appjson, indent=4),"w")
+
 def process_js(js_file):
-    fname = OUTPUT_FOLDER + "/" + js_file
     if os.path.exists(js_file) is False:
         return
 
@@ -184,7 +192,7 @@ def process_js(js_file):
         index = line.rindex("});")
         line = line[0:index]
 
-        if "}" in line:
+        if line.endswith("			") is False and "}" in line:
             index = line.rindex("}")
             line = line[0:index]
 
@@ -200,52 +208,71 @@ def process_js(js_file):
         else:
             write_file(fname, line, "w")
 
+def get_wxss_content(buf):
+    if type(buf).__name__=="str":
+        return buf
+
+    content = ""
+    for item in buf:
+        if type(item).__name__ == "str":
+            content += item
+        elif type(item).__name__ == "list":
+            op = item[0]
+            if op==0:
+                content += str(item[1])#rpx不处理了，直接加
+            elif op==1:
+                pass
+            elif op==2:
+                wxss = COMMON_STYLESHEETS.get(item[1])
+                if wxss is None:
+                    pass
+                else:
+                    content += wxss
+    return content
+
 def process_wxss(fname):
-    fname = OUTPUT_FOLDER + "/"+fname
     if os.path.exists(fname) is False:
         return
 
     f = open(fname, "r")
-    all_lines = f.readlines()
+    all_lines = ''.join(f.readlines())
     f.close()
 
+    jsons = all_lines.split("__COMMON_STYLESHEETS__['")
+    for i in range(1,len(jsons)):
+        index = jsons[i].find("[")
+        index2 = jsons[i].find("];")
+        if index>-1 and index2>-1:
+            buf = eval(jsons[i][index:index2+1])
+            COMMON_STYLESHEETS[jsons[i][0:index-3]] = get_wxss_content(buf)
     token = ".wxss"
-    jsons = ''.join(all_lines).split("setCssToHead(")
+    jsons = all_lines.split("setCssToHead(")
 
     for j in jsons:
         if token in j:
-            index = j.find('",],', 0)
+            index = j.find('.wxss"})', 0)
             if index == -1:
                 continue
-            buf = j[0:index] + ";}"
-            content = buf[:-2].replace('",[1],"', '').replace("\\n", '\n')
-            items = content.split("\n")
+            buf = eval('['+j[0:index].replace("undefined",'[]').replace("path",'"path"') + '.wxss"}]')
+            if len(buf[0])==0:
+                continue
 
-            content = ""
-            for item in items:
-                if item == ";}":
-                    continue
-                if item.startswith('["'):
-                    item = item[2:]
-                c2 = item.replace("{", " {\n\t").replace(";", ";\n\t").replace("}", "\n}\n\n").replace("\\x3d",
-                                                                                                       "=").replace(
-                    "\\x22", '"').replace('",[0,', "").replace('],"', 'px').replace(":", ": ").replace("wx-", "")
-                c3 = c2.replace("\n}\n\n", ";\n}\n\n")
-                if c3.startswith(";"):
-                    c3 = c3[1:]
-                content += c3
+            wxss = get_wxss_content(buf[0])
+            COMMON_STYLESHEETS[buf[2]["path"]] = wxss
 
-            fname = get_string_by_seperators(j, ',{path:"', '"})', 0)[0].replace("./", "")
+            fname = buf[2]["path"].replace("./", "")
             print("Processing " + fname)
-            write_file(fname, content.replace("body {", "page {").replace(": : ", "::"), "w")
+            write_file(fname, wxss, "w")
+
+    return
 
 def process_wxml_nodes(nodes):
     wxml = ""
-    if global_wxml[1]>0:
-        wxml = "\t"*global_wxml[1]
+    if WXML_CONTENT[1]>0:
+        wxml = "\t" * WXML_CONTENT[1]
 
     if type(nodes).__name__ != "dict":
-        global_wxml[0] += str(nodes)
+        WXML_CONTENT[0] += str(nodes)
         return
 
     tag = nodes["tag"].replace("wx-", "")
@@ -257,14 +284,14 @@ def process_wxml_nodes(nodes):
     wxml += ">"
     wxml += "\n"
 
-    global_wxml[0] += wxml
+    WXML_CONTENT[0] += wxml
 
-    global_wxml[1] += 1
+    WXML_CONTENT[1] += 1
     for child in nodes["children"]:
         process_wxml_nodes(child)
-    global_wxml[1] -= 1
+    WXML_CONTENT[1] -= 1
 
-    global_wxml[0] += "</" + tag + ">\n"
+    WXML_CONTENT[0] += "</" + tag + ">\n"
 
     return
 
@@ -289,7 +316,6 @@ def process_wxml_remove_useless(wxml_source):
     return source
 
 def process_wxml(pageframe):
-    pageframe = OUTPUT_FOLDER + "/" + pageframe
     if os.path.exists(pageframe) is False:
         return
 
@@ -329,11 +355,11 @@ def process_wxml(pageframe):
         print("Processing "+fname)
         if len(nodes["children"])==0:
             continue
-        global global_wxml
+        global WXML_CONTENT
         process_wxml_nodes(nodes["children"][0])
-        write_file(fname,global_wxml[0],"w")
+        write_file(fname, WXML_CONTENT[0], "w")
 
-        global_wxml = ["",0]
+        WXML_CONTENT = ["", 0]
 
 def process(flist,func):
     for f in flist:
@@ -416,6 +442,9 @@ def main():
     print("Unpacking JSON files...")
     process_json(OUTPUT_FOLDER+"/app-service.js")
 
+    if os.path.exists(OUTPUT_FOLDER + "/app.json") is False:
+        process_json2(OUTPUT_FOLDER + "/app-config.json")
+
     print("================================================================")
     print("")
     print("Unpacking JS files...")
@@ -425,7 +454,7 @@ def main():
     print("================================================================")
     print("")
     print("Unpacking WXSS files...")
-    process(["/page-frame.js", "/page-frame.html"], process_wxss)
+    process(["/app-wxss.js","/page-frame.js", "/page-frame.html"], process_wxss)
 
     print("================================================================")
     print("")
