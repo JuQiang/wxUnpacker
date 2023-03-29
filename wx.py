@@ -1,13 +1,12 @@
 from Crypto.Cipher import AES
 import hashlib
-import os
 import json
+import requests
 import urllib
 import jsbeautifier
 import execjs
 import argparse
 import os
-import copy
 
 # 微信小程序文件格式
 # 文件头
@@ -180,7 +179,7 @@ def process_js(js_file):
     all_lines = f.readlines()
     f.close()
 
-    items = ''.join(all_lines).split('define("')
+    items = ''.join(all_lines).split('\tdefine("')
     for i in range(1,len(items)):
         line = items[i]
         index = line.index(",")
@@ -253,7 +252,28 @@ def process_wxss(fname):
             index = j.find('.wxss"})', 0)
             if index == -1:
                 continue
-            buf = eval('['+j[0:index].replace("undefined",'[]').replace("path",'"path"') + '.wxss"}]')
+            try:
+                buf = eval('['+j[0:index].replace("undefined",'[]').replace("path",'"path"') + '.wxss"}]')
+            except Exception as e:
+                print(e)
+            # items = ('[' + j[0:index].replace("undefined", '[]').replace("path", '"path"') + '.wxss"}]').split(",[")
+            # buf = [["."]]
+            # for i in range(1,len(items)-1):
+            #     index3 = items[i].find("],")
+            #     if index3>-1:
+            #         buf[0].append(eval('['+items[i][0:index3+1]))
+            #         buf[0].append(items[i][index3+2:])
+            #
+            # last = items[len(items)-1]
+            # index3 = last.find(",],")
+            # if index3>-1:
+            #     buf.append(eval("["+last[0:index3+2]))
+            #     buf.append(eval(last[index3+3:][:-1]))
+            # else:
+            #     index3 = last.find("],")
+            #     buf.append(eval("["+last[0:index3+1]))
+            #     buf.append(eval(last[index3+2:][:-1]))
+
             if len(buf[0])==0:
                 continue
 
@@ -324,8 +344,8 @@ def process_wxml(pageframe):
         return
 
     flist = "\n"
-    patch = 'var window={};var navigator={};navigator.userAgent="iPhone";window.screen={};document={};function define(){};function require(){};function setCssToHead(file, _xcInvalid, info){};'
-
+    patch = 'var global={};var __wxAppCode__={};var __vd_version_info__={};var window={};var navigator={};navigator.userAgent="iPhone";window.screen={};document={};function define(){};function require(){};function setCssToHead(file, _xcInvalid, info){};'
+    patch += "console=window.console || (function(){var c={};c.log=c.warn=c.error=c.info=function(){};return c;})();"
     items = source.split("else __wxAppCode__[")
     x = []
     index = 0
